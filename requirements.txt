@@ -1,0 +1,7 @@
+langchain
+langchain-community
+langgraph
+ollama
+pytest
+flake8
+streamlit
