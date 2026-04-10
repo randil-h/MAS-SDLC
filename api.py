@@ -7,8 +7,12 @@ Run with:
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import threading
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -129,6 +133,12 @@ def _pipeline_worker(run_id: str) -> None:
     os.environ["OLLAMA_MODEL"] = run["model_name"]
     os.environ["OLLAMA_BASE_URL"] = run["ollama_base_url"]
 
+    model = run["model_name"]
+    base_url = run["ollama_base_url"]
+
+    if not _model_is_available(model, base_url):
+        _pull_model(model, base_url, run_id)
+
     state = run["initial_state"]
     total_steps = len(STEP_ORDER)
 
@@ -177,6 +187,92 @@ def _pipeline_worker(run_id: str) -> None:
                         step["status"] = "failed"
                         step["completed_at"] = _utc_now_iso()
                         break
+
+
+def _model_is_available(model: str, base_url: str) -> bool:
+    """Return True if the model is already present in the local Ollama registry."""
+    try:
+        url = base_url.rstrip("/") + "/api/tags"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data: dict[str, Any] = json.loads(resp.read())
+        names: list[str] = [m.get("name", "") for m in data.get("models", [])]
+        # Match "phi3:mini" against "phi3:mini", "phi3:mini:latest", etc.
+        tag_prefix = model.split(":")[0] + ":"
+        return any(
+            n == model or n.startswith(tag_prefix) or n == model + ":latest"
+            for n in names
+        )
+    except Exception:
+        # If we can't reach Ollama at all, let the agent fail with a clear message.
+        return True
+
+
+def _pull_model(model: str, base_url: str, run_id: str) -> None:
+    """
+    Pull a missing model and stream progress into the run's current_step_label.
+
+    Tries the Ollama REST API first (streaming JSON); falls back to the
+    `ollama pull` CLI if the HTTP pull is unavailable.
+    """
+    def _set_label(label: str) -> None:
+        with _runs_lock:
+            if run_id in _runs:
+                _runs[run_id]["current_step_label"] = label
+
+    _set_label(f"Pulling model: {model} ...")
+
+    # --- Try REST API streaming pull ---
+    try:
+        pull_url = base_url.rstrip("/") + "/api/pull"
+        body = json.dumps({"name": model, "stream": True}).encode()
+        req = urllib.request.Request(
+            pull_url,
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=600) as resp:
+            for raw_line in resp:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    chunk: dict[str, Any] = json.loads(line)
+                    status_msg: str = chunk.get("status", "")
+                    completed = chunk.get("completed")
+                    total = chunk.get("total")
+                    if completed and total:
+                        pct = int(completed / total * 100)
+                        _set_label(f"Pulling {model}: {pct}%")
+                    elif status_msg:
+                        _set_label(f"Pulling {model}: {status_msg}")
+                except json.JSONDecodeError:
+                    pass
+        _set_label(f"Model ready: {model}")
+        return
+    except urllib.error.URLError:
+        pass  # fall through to CLI
+
+    # --- Fallback: CLI ---
+    _set_label(f"Pulling {model} via CLI ...")
+    try:
+        proc = subprocess.Popen(
+            ["ollama", "pull", model],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        assert proc.stdout
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                _set_label(f"Pulling {model}: {line[:80]}")
+        proc.wait()
+    except FileNotFoundError:
+        _set_label(f"Warning: 'ollama' CLI not found; model pull skipped")
+
+    _set_label(f"Model ready: {model}")
 
 
 def _to_summary(run_id: str, run: dict[str, Any]) -> RunSummary:
