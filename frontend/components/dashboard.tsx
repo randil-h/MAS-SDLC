@@ -97,6 +97,7 @@ export function Dashboard() {
   const [selectedModel, setSelectedModel] = useState("phi3:mini");
   const [customModel, setCustomModel]   = useState("");
   const [ollamaUrl, setOllamaUrl]       = useState("http://localhost:11434");
+  const [numCtx, setNumCtx]             = useState(2048);
   const [runId, setRunId]               = useState<string | null>(null);
   const [run, setRun]                   = useState<RunDetails | null>(null);
   const [tab, setTab]                   = useState<ActiveTab>("requirements");
@@ -108,21 +109,54 @@ export function Dashboard() {
 
   const selectedOption = MODEL_OPTIONS.find((m) => m.value === selectedModel);
 
-  /* polling */
+  /* polling — exponential back-off, stops after 5 consecutive hard errors */
   useEffect(() => {
     if (!runId) return;
     let active = true;
+    let consecutiveErrors = 0;
+    let timeoutId: ReturnType<typeof setTimeout>;
+
+    const BASE_INTERVAL_MS  = 1500;
+    const MAX_INTERVAL_MS   = 12000;
+    const MAX_ERRORS        = 5;
+
     const poll = async () => {
       try {
         const d = await getRun(runId);
-        if (active) setRun(d);
+        if (!active) return;
+        consecutiveErrors = 0;
+        setRun(d);
+
+        // Stop polling once the run reaches a terminal state
+        if (d.status === "completed" || d.status === "failed") return;
+
+        timeoutId = setTimeout(poll, BASE_INTERVAL_MS);
       } catch (e) {
-        if (active) setSubmitError((e as Error).message);
+        if (!active) return;
+        consecutiveErrors += 1;
+
+        if (consecutiveErrors >= MAX_ERRORS) {
+          setSubmitError(
+            "Lost connection to the API server. Please check that uvicorn is still running, " +
+            "then refresh the page."
+          );
+          return; // stop polling entirely
+        }
+
+        // exponential back-off: 1.5 s → 3 s → 6 s → 12 s
+        const delay = Math.min(
+          BASE_INTERVAL_MS * Math.pow(2, consecutiveErrors - 1),
+          MAX_INTERVAL_MS
+        );
+        timeoutId = setTimeout(poll, delay);
       }
     };
+
     poll();
-    const id = setInterval(poll, 1500);
-    return () => { active = false; clearInterval(id); };
+    return () => {
+      active = false;
+      clearTimeout(timeoutId);
+    };
   }, [runId]);
 
   const isActive = isSubmitting || run?.status === "queued" || run?.status === "running";
@@ -135,7 +169,7 @@ export function Dashboard() {
     setIsSubmitting(true);
     setRun(null);
     try {
-      const s = await createRun({ user_prompt: prompt.trim(), model_name: resolvedModel, ollama_base_url: ollamaUrl.trim() });
+      const s = await createRun({ user_prompt: prompt.trim(), model_name: resolvedModel, ollama_base_url: ollamaUrl.trim(), num_ctx: numCtx });
       setRunId(s.run_id);
     } catch (err) {
       setSubmitError((err as Error).message);
@@ -155,13 +189,13 @@ export function Dashboard() {
         <p className="text-[10px] font-bold tracking-[0.2em] uppercase text-stone-400 mb-4">
           MAS SDLC — Multi-Agent Pipeline
         </p>
-        <h1 className="text-6xl sm:text-7xl lg:text-8xl font-extrabold tracking-tighter leading-none text-stone-900">
+        <h1 className="text-6xl sm:text-7xl lg:text-7xl font-semibold tracking-tighter leading-none text-stone-900">
           AI Software<br />Delivery Team
         </h1>
         <p className="mt-5 max-w-xl text-stone-500 text-[15px] leading-relaxed">
           Four specialised agents work sequentially to turn a plain-English
           feature request into requirements, working code, tests, and a review —
-          all running locally via Ollama.
+          all running locally via selectable models.
         </p>
       </header>
 
@@ -169,7 +203,7 @@ export function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-[480px_1fr] gap-5">
 
         {/* ── Left: form ── */}
-        <section className="bg-white border border-stone-200 rounded-xl p-7">
+        <section className="bg-white  rounded-xl p-7">
           <SectionLabel>New Pipeline Run</SectionLabel>
 
           <form onSubmit={onSubmit} className="space-y-5">
@@ -224,6 +258,26 @@ export function Dashboard() {
               </div>
             </div>
 
+            {/* Context window */}
+            <div>
+              <FieldLabel htmlFor="num-ctx">Context Window (tokens)</FieldLabel>
+              <select
+                id="num-ctx"
+                value={numCtx}
+                onChange={(e) => setNumCtx(Number(e.target.value))}
+                className={inputClass()}
+              >
+                <option value={512}>512 — minimal memory</option>
+                <option value={1024}>1024 — light</option>
+                <option value={2048}>2048 — default (recommended)</option>
+                <option value={4096}>4096 — larger responses</option>
+                <option value={8192}>8192 — needs lots of RAM</option>
+              </select>
+              <p className="text-[11px] text-stone-400 mt-1.5">
+                Smaller = less RAM/VRAM pressure. Raise only if outputs are getting cut off.
+              </p>
+            </div>
+
             {/* Custom model input */}
             {selectedModel === "__custom__" && (
               <div>
@@ -254,14 +308,14 @@ export function Dashboard() {
           </form>
 
           {submitError && (
-            <div className="mt-4 px-4 py-3 border border-red-200 bg-red-50 rounded-lg text-red-600 text-sm">
+            <div className="mt-4 px-4 py-3 bg-red-50 rounded-lg text-red-600 text-sm">
               {submitError}
             </div>
           )}
         </section>
 
         {/* ── Right: live status ── */}
-        <section className="bg-white border border-stone-200 rounded-xl p-7">
+        <section className="bg-white rounded-xl p-7">
           <SectionLabel>Live Status</SectionLabel>
 
           {!run ? (
@@ -314,7 +368,7 @@ export function Dashboard() {
         </section>
 
         {/* ── Full-width: outputs ── */}
-        <section className="lg:col-span-2 bg-white border border-stone-200 rounded-xl p-7">
+        <section className="lg:col-span-2 bg-white rounded-xl p-7">
           <SectionLabel>Pipeline Outputs</SectionLabel>
 
           {/* Tab bar */}

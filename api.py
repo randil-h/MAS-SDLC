@@ -2,7 +2,7 @@
 REST API for MAS SDLC pipeline orchestration.
 
 Run with:
-    uvicorn api:app --reload
+    uvicorn api:app --port 8000
 """
 
 from __future__ import annotations
@@ -27,34 +27,94 @@ from agents.code_reviewer_agent import code_reviewer_node
 from agents.requirements_agent import requirements_node
 from agents.test_engineer_agent import test_engineer_node
 
+# ---------------------------------------------------------------------------
+# Step registry
+# ---------------------------------------------------------------------------
+
 STEP_ORDER: list[tuple[str, str, Any]] = [
-    (
-        "requirements",
-        "Requirements Analyst",
-        requirements_node,
-    ),
-    (
-        "code_generator",
-        "Code Generator",
-        code_generator_node,
-    ),
-    (
-        "test_engineer",
-        "Test Engineer",
-        test_engineer_node,
-    ),
-    (
-        "code_reviewer",
-        "Code Reviewer",
-        code_reviewer_node,
-    ),
+    ("requirements",  "Requirements Analyst", requirements_node),
+    ("code_generator","Code Generator",       code_generator_node),
+    ("test_engineer", "Test Engineer",         test_engineer_node),
+    ("code_reviewer", "Code Reviewer",         code_reviewer_node),
 ]
+
+# ---------------------------------------------------------------------------
+# Disk persistence
+#
+# Every run is written to runs/<run_id>.json after each state mutation so
+# a server restart (uvicorn --reload, OOM crash, etc.) doesn't lose state.
+# The `initial_state` field is internal pipeline scratch-space and is never
+# serialised to disk to keep files small.
+# ---------------------------------------------------------------------------
+
+_RUNS_DIR = Path("runs")
+_INTERNAL_KEYS = {"initial_state"}   # strip before writing to disk
+
+
+def _persist_run(run_id: str, run: dict[str, Any]) -> None:
+    """Write a sanitised copy of the run dict to disk (non-blocking best-effort)."""
+    try:
+        _RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {k: v for k, v in run.items() if k not in _INTERNAL_KEYS}
+        (_RUNS_DIR / f"{run_id}.json").write_text(
+            json.dumps(payload, default=str, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass  # persistence failures must never kill the worker thread
+
+
+def _load_run_from_disk(run_id: str) -> dict[str, Any] | None:
+    """Return a run dict loaded from disk, or None if not found."""
+    path = _RUNS_DIR / f"{run_id}.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _recover_interrupted_runs() -> None:
+    """
+    On server startup scan the runs directory and mark any runs that were
+    left in 'running' or 'queued' state (i.e. interrupted by a crash) as
+    'failed'.  The pipeline thread is gone so they can never complete.
+    """
+    if not _RUNS_DIR.exists():
+        return
+    for path in _RUNS_DIR.glob("*.json"):
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+            if run.get("status") in ("running", "queued"):
+                run["status"] = "failed"
+                run["completed_at"] = _utc_now_iso()
+                run.setdefault("errors", []).append(
+                    "Run was interrupted by a server restart and cannot resume."
+                )
+                # Mark any in-progress step as failed too
+                for step in run.get("steps", []):
+                    if step.get("status") in ("running", "queued", "pending"):
+                        step["status"] = "failed"
+                        step["completed_at"] = step.get("completed_at") or _utc_now_iso()
+                path.write_text(
+                    json.dumps(run, default=str, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# API models
+# ---------------------------------------------------------------------------
 
 
 class RunCreateRequest(BaseModel):
     user_prompt: str = Field(min_length=5, max_length=6000)
-    model_name: str = Field(default="llama3:8b", max_length=200)
+    model_name: str = Field(default="phi3:mini", max_length=200)
     ollama_base_url: str = Field(default="http://localhost:11434", max_length=500)
+    num_ctx: int = Field(default=2048, ge=512, le=32768)
 
 
 class RunSummary(BaseModel):
@@ -74,8 +134,16 @@ class RunDetails(RunSummary):
     log_path: str | None
 
 
+# ---------------------------------------------------------------------------
+# In-memory store + lock
+# ---------------------------------------------------------------------------
+
 _runs: dict[str, dict[str, Any]] = {}
 _runs_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# App + CORS
+# ---------------------------------------------------------------------------
 
 app = FastAPI(title="MAS SDLC API", version="1.0.0")
 app.add_middleware(
@@ -87,8 +155,27 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _on_startup() -> None:
+    """Recover any runs left interrupted by a previous crash."""
+    _recover_interrupted_runs()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
 def _utc_now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
+
+
+def _mutate_run(run_id: str, updates: dict[str, Any]) -> None:
+    """Apply updates to the in-memory run dict and immediately persist to disk."""
+    with _runs_lock:
+        run = _runs[run_id]
+        run.update(updates)
+        _persist_run(run_id, run)
 
 
 def _new_run_state(payload: RunCreateRequest) -> dict[str, Any]:
@@ -97,7 +184,13 @@ def _new_run_state(payload: RunCreateRequest) -> dict[str, Any]:
     Path("output").mkdir(parents=True, exist_ok=True)
     Path("logs").mkdir(parents=True, exist_ok=True)
     steps = [
-        {"key": key, "label": label, "status": "pending", "started_at": None, "completed_at": None}
+        {
+            "key": key,
+            "label": label,
+            "status": "pending",
+            "started_at": None,
+            "completed_at": None,
+        }
         for key, label, _ in STEP_ORDER
     ]
     return {
@@ -111,6 +204,7 @@ def _new_run_state(payload: RunCreateRequest) -> dict[str, Any]:
         "errors": [],
         "result": None,
         "log_path": log_path,
+        # Internal — stripped before disk persistence
         "initial_state": {
             "user_prompt": payload.user_prompt.strip(),
             "requirements": None,
@@ -122,107 +216,42 @@ def _new_run_state(payload: RunCreateRequest) -> dict[str, Any]:
         },
         "model_name": payload.model_name,
         "ollama_base_url": payload.ollama_base_url,
+        "num_ctx": payload.num_ctx,
     }
 
 
-def _pipeline_worker(run_id: str) -> None:
-    with _runs_lock:
-        run = _runs[run_id]
-        run["status"] = "running"
-
-    os.environ["OLLAMA_MODEL"] = run["model_name"]
-    os.environ["OLLAMA_BASE_URL"] = run["ollama_base_url"]
-
-    model = run["model_name"]
-    base_url = run["ollama_base_url"]
-
-    if not _model_is_available(model, base_url):
-        _pull_model(model, base_url, run_id)
-
-    state = run["initial_state"]
-    total_steps = len(STEP_ORDER)
-
-    try:
-        for idx, (step_key, step_label, step_fn) in enumerate(STEP_ORDER):
-            with _runs_lock:
-                current_run = _runs[run_id]
-                current_run["current_step_key"] = step_key
-                current_run["current_step_label"] = step_label
-                current_run["steps"][idx]["status"] = "running"
-                current_run["steps"][idx]["started_at"] = _utc_now_iso()
-                current_run["progress_percent"] = int((idx / total_steps) * 100)
-
-            state = step_fn(state)
-
-            with _runs_lock:
-                current_run = _runs[run_id]
-                current_run["steps"][idx]["status"] = "completed"
-                current_run["steps"][idx]["completed_at"] = _utc_now_iso()
-                current_run["progress_percent"] = int(((idx + 1) / total_steps) * 100)
-                current_run["errors"] = list(state.get("errors") or [])
-
-        with _runs_lock:
-            current_run = _runs[run_id]
-            current_run["status"] = "completed"
-            current_run["current_step_key"] = None
-            current_run["current_step_label"] = None
-            current_run["completed_at"] = _utc_now_iso()
-            current_run["result"] = {
-                "requirements": state.get("requirements"),
-                "generated_code": state.get("generated_code"),
-                "test_results": state.get("test_results"),
-                "review_report": state.get("review_report"),
-                "errors": state.get("errors") or [],
-                "log_path": state.get("log_path"),
-            }
-    except Exception as exc:
-        with _runs_lock:
-            current_run = _runs[run_id]
-            current_run["status"] = "failed"
-            current_run["completed_at"] = _utc_now_iso()
-            current_run["errors"] = list(current_run.get("errors") or []) + [f"Unhandled API error: {exc}"]
-            if current_run["current_step_key"]:
-                for step in current_run["steps"]:
-                    if step["key"] == current_run["current_step_key"] and step["status"] == "running":
-                        step["status"] = "failed"
-                        step["completed_at"] = _utc_now_iso()
-                        break
+# ---------------------------------------------------------------------------
+# Model availability + auto-pull
+# ---------------------------------------------------------------------------
 
 
 def _model_is_available(model: str, base_url: str) -> bool:
-    """Return True if the model is already present in the local Ollama registry."""
     try:
         url = base_url.rstrip("/") + "/api/tags"
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=8) as resp:
             data: dict[str, Any] = json.loads(resp.read())
         names: list[str] = [m.get("name", "") for m in data.get("models", [])]
-        # Match "phi3:mini" against "phi3:mini", "phi3:mini:latest", etc.
         tag_prefix = model.split(":")[0] + ":"
         return any(
             n == model or n.startswith(tag_prefix) or n == model + ":latest"
             for n in names
         )
     except Exception:
-        # If we can't reach Ollama at all, let the agent fail with a clear message.
-        return True
+        return True  # can't check → let the agent fail with a clear message
 
 
 def _pull_model(model: str, base_url: str, run_id: str) -> None:
-    """
-    Pull a missing model and stream progress into the run's current_step_label.
+    """Pull a missing model, streaming progress into the run's current_step_label."""
 
-    Tries the Ollama REST API first (streaming JSON); falls back to the
-    `ollama pull` CLI if the HTTP pull is unavailable.
-    """
     def _set_label(label: str) -> None:
         with _runs_lock:
             if run_id in _runs:
                 _runs[run_id]["current_step_label"] = label
+                _persist_run(run_id, _runs[run_id])
 
     _set_label(f"Pulling model: {model} ...")
 
-    # --- Try REST API streaming pull ---
     try:
         pull_url = base_url.rstrip("/") + "/api/pull"
         body = json.dumps({"name": model, "stream": True}).encode()
@@ -252,9 +281,8 @@ def _pull_model(model: str, base_url: str, run_id: str) -> None:
         _set_label(f"Model ready: {model}")
         return
     except urllib.error.URLError:
-        pass  # fall through to CLI
+        pass
 
-    # --- Fallback: CLI ---
     _set_label(f"Pulling {model} via CLI ...")
     try:
         proc = subprocess.Popen(
@@ -270,9 +298,93 @@ def _pull_model(model: str, base_url: str, run_id: str) -> None:
                 _set_label(f"Pulling {model}: {line[:80]}")
         proc.wait()
     except FileNotFoundError:
-        _set_label(f"Warning: 'ollama' CLI not found; model pull skipped")
+        _set_label("Warning: 'ollama' CLI not found; model pull skipped")
 
     _set_label(f"Model ready: {model}")
+
+
+# ---------------------------------------------------------------------------
+# Pipeline worker
+# ---------------------------------------------------------------------------
+
+
+def _pipeline_worker(run_id: str) -> None:
+    with _runs_lock:
+        run = _runs[run_id]
+        run["status"] = "running"
+        _persist_run(run_id, run)
+
+    model     = run["model_name"]
+    base_url  = run["ollama_base_url"]
+    num_ctx   = run.get("num_ctx", 2048)
+
+    os.environ["OLLAMA_MODEL"]    = model
+    os.environ["OLLAMA_BASE_URL"] = base_url
+    os.environ["OLLAMA_NUM_CTX"]  = str(num_ctx)
+
+    if not _model_is_available(model, base_url):
+        _pull_model(model, base_url, run_id)
+
+    state = run["initial_state"]
+    total_steps = len(STEP_ORDER)
+
+    try:
+        for idx, (step_key, step_label, step_fn) in enumerate(STEP_ORDER):
+            with _runs_lock:
+                current_run = _runs[run_id]
+                current_run["current_step_key"]           = step_key
+                current_run["current_step_label"]         = step_label
+                current_run["steps"][idx]["status"]       = "running"
+                current_run["steps"][idx]["started_at"]   = _utc_now_iso()
+                current_run["progress_percent"]           = int((idx / total_steps) * 100)
+                _persist_run(run_id, current_run)
+
+            state = step_fn(state)
+
+            with _runs_lock:
+                current_run = _runs[run_id]
+                current_run["steps"][idx]["status"]         = "completed"
+                current_run["steps"][idx]["completed_at"]   = _utc_now_iso()
+                current_run["progress_percent"]             = int(((idx + 1) / total_steps) * 100)
+                current_run["errors"]                       = list(state.get("errors") or [])
+                _persist_run(run_id, current_run)
+
+        with _runs_lock:
+            current_run = _runs[run_id]
+            current_run["status"]               = "completed"
+            current_run["current_step_key"]     = None
+            current_run["current_step_label"]   = None
+            current_run["completed_at"]         = _utc_now_iso()
+            current_run["result"] = {
+                "requirements":  state.get("requirements"),
+                "generated_code": state.get("generated_code"),
+                "test_results":  state.get("test_results"),
+                "review_report": state.get("review_report"),
+                "errors":        state.get("errors") or [],
+                "log_path":      state.get("log_path"),
+            }
+            _persist_run(run_id, current_run)
+
+    except Exception as exc:
+        with _runs_lock:
+            current_run = _runs[run_id]
+            current_run["status"]       = "failed"
+            current_run["completed_at"] = _utc_now_iso()
+            current_run["errors"]       = list(current_run.get("errors") or []) + [
+                f"Unhandled pipeline error: {exc}"
+            ]
+            if current_run["current_step_key"]:
+                for step in current_run["steps"]:
+                    if step["key"] == current_run["current_step_key"] and step["status"] == "running":
+                        step["status"]       = "failed"
+                        step["completed_at"] = _utc_now_iso()
+                        break
+            _persist_run(run_id, current_run)
+
+
+# ---------------------------------------------------------------------------
+# Serialisation helpers
+# ---------------------------------------------------------------------------
 
 
 def _to_summary(run_id: str, run: dict[str, Any]) -> RunSummary:
@@ -297,6 +409,11 @@ def _to_details(run_id: str, run: dict[str, Any]) -> RunDetails:
     )
 
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -304,10 +421,11 @@ def health() -> dict[str, str]:
 
 @app.post("/api/runs", response_model=RunSummary)
 def create_run(payload: RunCreateRequest) -> RunSummary:
-    run_id = uuid.uuid4().hex
+    run_id    = uuid.uuid4().hex
     run_state = _new_run_state(payload)
     with _runs_lock:
         _runs[run_id] = run_state
+        _persist_run(run_id, run_state)
     thread = threading.Thread(target=_pipeline_worker, args=(run_id,), daemon=True)
     thread.start()
     with _runs_lock:
@@ -322,8 +440,17 @@ def list_runs() -> list[RunSummary]:
 
 @app.get("/api/runs/{run_id}", response_model=RunDetails)
 def get_run(run_id: str) -> RunDetails:
+    # Check in-memory first (fast path)
     with _runs_lock:
         run = _runs.get(run_id)
-        if not run:
+
+    # Fall back to disk — covers server restarts
+    if run is None:
+        run = _load_run_from_disk(run_id)
+        if run is None:
             raise HTTPException(status_code=404, detail="Run not found")
-        return _to_details(run_id, run)
+        # Restore into memory so subsequent polls are fast
+        with _runs_lock:
+            _runs[run_id] = run
+
+    return _to_details(run_id, run)

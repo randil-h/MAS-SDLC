@@ -35,6 +35,7 @@ export async function createRun(payload: {
   user_prompt: string;
   model_name: string;
   ollama_base_url: string;
+  num_ctx?: number;
 }): Promise<{ run_id: string }> {
   const response = await fetch(`${API_BASE}/api/runs`, {
     method: "POST",

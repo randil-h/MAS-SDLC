@@ -1,6 +1,7 @@
 # Runtime outputs — regenerated on every pipeline run
 output/
 logs/
+runs/
 
 # Python artefacts
 __pycache__/

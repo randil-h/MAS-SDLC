@@ -28,11 +28,19 @@ from tools.file_tools import append_log, read_from_file, save_to_file
 # runtime configuration is honored without restarting the process.
 # ---------------------------------------------------------------------------
 
-_MODEL = os.environ.get("OLLAMA_MODEL", "llama3:8b")
+_MODEL = os.environ.get("OLLAMA_MODEL", "phi3:mini")
 _BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _REQUIREMENTS_PATH = "output/requirements.json"
 _CODE_OUTPUT_PATH = "output/generated_code.py"
 _AGENT_NAME = "CodeGeneratorAgent"
+
+# GPU / memory tuning
+# num_gpu=99  → send all layers to Metal GPU (Apple Silicon) / CUDA (NVIDIA).
+#               Falls back to CPU automatically if the GPU can't fit the model.
+# num_ctx     → context window in tokens.  Smaller = less VRAM/RAM pressure.
+#               Default Ollama value is 2048; override via OLLAMA_NUM_CTX.
+_NUM_GPU = 99
+_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "2048"))
 
 _SYSTEM_PROMPT = """You are an expert Python developer. You will receive a structured requirements document and must write clean, working Python code that fulfills all requirements.
 
@@ -165,10 +173,19 @@ def code_generator_node(state: SDLCState) -> SDLCState:
         prompt = _build_prompt(requirements)
 
         # Step 3 — Call LLM (read env at invocation time to honor API request config)
-        model = os.environ.get("OLLAMA_MODEL", _MODEL)
+        model    = os.environ.get("OLLAMA_MODEL",   _MODEL)
         base_url = os.environ.get("OLLAMA_BASE_URL", _BASE_URL)
-        llm = Ollama(model=model, base_url=base_url)
-        tool_calls.append(f"Ollama.invoke(model='{model}', base_url='{base_url}')")
+        num_ctx  = int(os.environ.get("OLLAMA_NUM_CTX", str(_NUM_CTX)))
+        llm = Ollama(
+            model=model,
+            base_url=base_url,
+            num_gpu=_NUM_GPU,   # push all transformer layers onto Metal / CUDA
+            num_ctx=num_ctx,    # keep context window small to reduce memory pressure
+        )
+        tool_calls.append(
+            f"Ollama.invoke(model='{model}', base_url='{base_url}', "
+            f"num_gpu={_NUM_GPU}, num_ctx={num_ctx})"
+        )
 
         raw_response: str = llm.invoke(prompt)
 
