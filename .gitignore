@@ -33,3 +33,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Frontend artefacts
+frontend/node_modules/
+frontend/.next/
