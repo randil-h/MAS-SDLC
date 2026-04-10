@@ -24,8 +24,8 @@ from tools.code_tools import ValidationResult, strip_markdown_fences, validate_p
 from tools.file_tools import append_log, read_from_file, save_to_file
 
 # ---------------------------------------------------------------------------
-# Constants — can be overridden via environment variables so the Streamlit
-# sidebar configuration is honoured without restarting the process.
+# Constants — can be overridden via environment variables so API-provided
+# runtime configuration is honored without restarting the process.
 # ---------------------------------------------------------------------------
 
 _MODEL = os.environ.get("OLLAMA_MODEL", "llama3:8b")
@@ -164,7 +164,7 @@ def code_generator_node(state: SDLCState) -> SDLCState:
         # Step 2 — Build prompt
         prompt = _build_prompt(requirements)
 
-        # Step 3 — Call LLM (read env at invocation time to honour Streamlit sidebar config)
+        # Step 3 — Call LLM (read env at invocation time to honor API request config)
         model = os.environ.get("OLLAMA_MODEL", _MODEL)
         base_url = os.environ.get("OLLAMA_BASE_URL", _BASE_URL)
         llm = Ollama(model=model, base_url=base_url)
