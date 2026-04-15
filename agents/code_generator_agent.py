@@ -17,7 +17,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from langchain_community.llms import Ollama
+from langchain_ollama import OllamaLLM
 
 from state import SDLCState
 from tools.code_tools import ValidationResult, strip_markdown_fences, validate_python_code
@@ -176,7 +176,7 @@ def code_generator_node(state: SDLCState) -> SDLCState:
         model    = os.environ.get("OLLAMA_MODEL",   _MODEL)
         base_url = os.environ.get("OLLAMA_BASE_URL", _BASE_URL)
         num_ctx  = int(os.environ.get("OLLAMA_NUM_CTX", str(_NUM_CTX)))
-        llm = Ollama(
+        llm = OllamaLLM(
             model=model,
             base_url=base_url,
             num_gpu=_NUM_GPU,   # push all transformer layers onto Metal / CUDA

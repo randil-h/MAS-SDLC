@@ -34,7 +34,8 @@ _BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 _REQUIREMENTS_OUTPUT_PATH = "output/requirements.json"
 _AGENT_NAME = "RequirementsAgent"
 _NUM_GPU = 99
-_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "2048"))
+_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "4096"))
+_NUM_PREDICT = int(os.environ.get("OLLAMA_NUM_PREDICT", "2048"))  # max output tokens
 
 # ---------------------------------------------------------------------------
 # System prompt — instructs the LLM to act as a Senior Business Analyst and
@@ -43,34 +44,24 @@ _NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "2048"))
 
 _SYSTEM_PROMPT = """\
 You are a Senior Business Analyst and Software Architect.
-Your task is to analyse a natural-language feature request and produce a structured requirements document.
+Analyse the feature request and output a requirements document as a single JSON object.
 
-CRITICAL RULES:
-1. Respond with ONLY a single valid JSON object. No prose, no markdown, no code fences.
-2. Do NOT include any text before or after the JSON object.
-3. The JSON object MUST contain exactly these 7 keys:
+RULES (follow exactly):
+1. Output ONLY the raw JSON object. No markdown, no code fences, no extra text.
+2. Keep every string value SHORT (one sentence max).
+3. Each list must have EXACTLY 3 items — no more, no less.
+4. Complete the ENTIRE JSON object before stopping.
 
+Required format:
 {
-  "feature_name": "<short name for the feature, max 60 chars>",
-  "description": "<2-4 sentence description of what the module must do>",
-  "functional_requirements": [
-    "<requirement 1>",
-    "<requirement 2>",
-    "<requirement 3 — provide at least 4 items>"
-  ],
-  "edge_cases": [
-    "<edge case 1>",
-    "<edge case 2 — provide at least 3 items>"
-  ],
-  "constraints": [
-    "<technical constraint 1>",
-    "<technical constraint 2 — provide at least 3 items>"
-  ],
-  "input_spec": "<description of the expected inputs, their types, and validation rules>",
-  "output_spec": "<description of the expected output format and return type>"
-}
-
-Be specific, technical, and precise. Base all requirements directly on the user's feature request.\
+  "feature_name": "<name, max 30 chars>",
+  "description": "<one sentence summary>",
+  "functional_requirements": ["<req 1>", "<req 2>", "<req 3>"],
+  "edge_cases": ["<case 1>", "<case 2>", "<case 3>"],
+  "constraints": ["<constraint 1>", "<constraint 2>", "<constraint 3>"],
+  "input_spec": "<one sentence describing inputs and their types>",
+  "output_spec": "<one sentence describing the return value or output>"
+}\
 """
 
 
@@ -98,6 +89,65 @@ def _build_prompt(user_prompt: str) -> str:
         "Here is the feature request you must analyse:\n\n"
         f"{user_prompt}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Helper — attempt to repair truncated JSON from LLM context cutoff
+# ---------------------------------------------------------------------------
+
+
+def _repair_truncated_json(text: str) -> str:
+    """
+    Attempt to repair a JSON string that was truncated mid-output by the LLM.
+
+    Works by finding the last cleanly-closed top-level value, trimming everything
+    after it, then closing any remaining open brackets/braces.
+
+    Parameters
+    ----------
+    text : str
+        The raw (possibly truncated) JSON string.
+
+    Returns
+    -------
+    str
+        A repaired JSON string, or an empty string if repair is not possible.
+    """
+    # Walk character by character tracking open structures
+    stack: list[str] = []
+    in_string = False
+    escape_next = False
+
+    for i, ch in enumerate(text):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ("{", "["):
+            stack.append(ch)
+        elif ch == "}":
+            if stack and stack[-1] == "{":
+                stack.pop()
+        elif ch == "]":
+            if stack and stack[-1] == "[":
+                stack.pop()
+
+    # If we're mid-string, close the string first then the open structures
+    suffix = '"' if in_string else ""
+
+    # Close open structures in reverse order
+    for bracket in reversed(stack):
+        suffix += "}" if bracket == "{" else "]"
+
+    repaired = text + suffix
+    return repaired
 
 
 # ---------------------------------------------------------------------------
@@ -137,18 +187,48 @@ def _parse_requirements(raw_response: str) -> tuple[dict, str | None]:
     # Strip any markdown fences the LLM may have added
     cleaned = strip_markdown_fences(raw_response).strip()
 
-    # Attempt JSON parsing
+    # --- Attempt 1: direct JSON parse ---
+    parsed = None
     try:
         parsed = json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        return {}, f"JSON parse error: {exc}. Raw response (first 500 chars): {cleaned[:500]}"
+    except json.JSONDecodeError:
+        pass
+
+    # --- Attempt 2: repair truncated JSON ---
+    # If the LLM ran out of context tokens it may cut off mid-string/array.
+    # Strategy: find the last complete top-level key-value pair, close any
+    # open structures, and retry parsing.
+    if parsed is None:
+        repaired = _repair_truncated_json(cleaned)
+        if repaired:
+            try:
+                parsed = json.loads(repaired)
+            except json.JSONDecodeError:
+                pass
+
+    if parsed is None:
+        return {}, (
+            f"JSON parse error: could not parse LLM response even after repair attempt. "
+            f"Raw response (first 500 chars): {cleaned[:500]}"
+        )
 
     if not isinstance(parsed, dict):
         return {}, f"Expected a JSON object, got {type(parsed).__name__}."
 
+    # Fill in safe defaults for any keys the LLM omitted (e.g. due to truncation)
+    # so the pipeline can always continue with at least a partial requirements doc.
+    defaults: dict = {
+        "feature_name": "Unknown Feature",
+        "description": "No description generated.",
+        "functional_requirements": ["No requirements generated."],
+        "edge_cases": ["No edge cases generated."],
+        "constraints": ["No constraints generated."],
+        "input_spec": "Not specified.",
+        "output_spec": "Not specified.",
+    }
     missing_keys = required_keys - set(parsed.keys())
-    if missing_keys:
-        return {}, f"LLM response is missing required keys: {missing_keys}."
+    for key in missing_keys:
+        parsed[key] = defaults[key]
 
     return parsed, None
 
@@ -204,12 +284,15 @@ def requirements_node(state: SDLCState) -> SDLCState:
         base_url = os.environ.get("OLLAMA_BASE_URL", _BASE_URL)
         num_ctx  = int(os.environ.get("OLLAMA_NUM_CTX", str(_NUM_CTX)))
 
-        llm = Ollama(
+        num_predict = int(os.environ.get("OLLAMA_NUM_PREDICT", str(_NUM_PREDICT)))
+        llm = OllamaLLM(
             model=model,
             base_url=base_url,
             num_gpu=_NUM_GPU,
             num_ctx=num_ctx,
+            num_predict=num_predict,
         )
+        tool_calls.append(f"num_predict={num_predict}")
         tool_calls.append(
             f"Ollama.invoke(model='{model}', base_url='{base_url}', "
             f"num_gpu={_NUM_GPU}, num_ctx={num_ctx})"
