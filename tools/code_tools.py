@@ -233,36 +233,55 @@ def _check_top_level_statements(tree: ast.Module, result: ValidationResult) -> N
 
 def strip_markdown_fences(code: str) -> str:
     """
-    Remove markdown code fences from a string returned by an LLM.
+    Extract Python source code from an LLM response that may contain prose and
+    markdown code fences.
 
-    Handles both ` ```python ` and plain ` ``` ` variants.  Lines outside
-    any fence block are kept intact; lines that are a fence marker are dropped.
+    Handles both ` ```python ` and plain ` ``` ` variants.
+
+    When at least one fenced block is present the function returns **only** the
+    content inside fence markers, discarding any surrounding prose.  This
+    prevents LLM preambles such as "Here is a possible implementation:" from
+    being included in the extracted code and causing syntax errors.
+
+    When no fence markers are found at all the entire string is returned
+    as-is (stripped), on the assumption that the LLM emitted raw code.
 
     Parameters
     ----------
     code : str
-        Raw LLM response that may contain markdown fencing.
+        Raw LLM response that may contain markdown fencing and/or prose.
 
     Returns
     -------
     str
-        Cleaned source code with all fence lines removed and leading/trailing
-        whitespace stripped.
+        Cleaned source code with fence lines and surrounding prose removed,
+        and leading/trailing whitespace stripped.
 
     Examples
     --------
-    >>> raw = "```python\\nprint('hello')\\n```"
+    >>> raw = "Here is the code:\\n```python\\nprint('hello')\\n```"
     >>> strip_markdown_fences(raw)
     "print('hello')"
     """
     lines = code.splitlines()
-    cleaned: list[str] = []
-    inside = False
+    inside_fence = False
+    found_fence = False
+    fenced_lines: list[str] = []
 
     for line in lines:
         if line.strip().startswith("```"):
-            inside = not inside
+            if not inside_fence:
+                inside_fence = True
+                found_fence = True
+            else:
+                inside_fence = False
             continue
-        cleaned.append(line)
+        if inside_fence:
+            fenced_lines.append(line)
 
-    return "\n".join(cleaned).strip()
+    # If fences were found, return only what was inside them.
+    # Otherwise fall back to returning the whole response (raw code path).
+    if found_fence:
+        return "\n".join(fenced_lines).strip()
+
+    return code.strip()

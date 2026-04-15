@@ -20,6 +20,14 @@ build/
 venv/
 env/
 
+# Environment files
+.env
+.env.*
+!.env.example
+frontend/.env.local
+frontend/.env.*
+!frontend/.env.example
+
 # IDE
 .idea/
 .vscode/
