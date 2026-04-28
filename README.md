@@ -124,3 +124,10 @@ MAS-SDLC/
 ├── logs/                          # Observability logs
 └── requirements.txt
 ```
+
+To run the code generator agent tests
+```bash
+pytest tests/test_code_generator_agent.py -rA
+```
+
+

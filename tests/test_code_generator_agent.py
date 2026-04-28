@@ -34,6 +34,8 @@ from tools.code_tools import strip_markdown_fences, validate_python_code
 # Shared fixtures
 # ---------------------------------------------------------------------------
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 _SAMPLE_REQUIREMENTS: dict = {
     "feature_name": "Password Validator",
     "description": "Validates a password string against a set of strength rules.",
@@ -155,7 +157,7 @@ class TestCodeGeneratorNodeOutputValidity(unittest.TestCase):
           - save_to_file   → writes to tmp_dir instead of output/
           - append_log     → no-ops (we don't test log format here)
         """
-        original_cwd = os.getcwd()
+        original_cwd = str(_PROJECT_ROOT)
         os.chdir(tmp_dir)
         Path("output").mkdir(exist_ok=True)
         Path("logs").mkdir(exist_ok=True)
@@ -168,7 +170,7 @@ class TestCodeGeneratorNodeOutputValidity(unittest.TestCase):
                 req_path.write_text(json.dumps(_SAMPLE_REQUIREMENTS), encoding="utf-8")
 
             with patch(
-                "agents.code_generator_agent.Ollama"
+                "agents.code_generator_agent.OllamaLLM"
             ) as MockOllama:
                 mock_llm = MagicMock()
                 mock_llm.invoke.return_value = _SAMPLE_CODE
@@ -194,7 +196,7 @@ class TestCodeGeneratorNodeOutputValidity(unittest.TestCase):
     def test_output_file_is_created(self) -> None:
         """output/generated_code.py must exist after the node runs."""
         with tempfile.TemporaryDirectory() as tmp:
-            original_cwd = os.getcwd()
+            original_cwd = str(_PROJECT_ROOT)
             os.chdir(tmp)
             Path("output").mkdir(exist_ok=True)
             Path("logs").mkdir(exist_ok=True)
@@ -202,7 +204,7 @@ class TestCodeGeneratorNodeOutputValidity(unittest.TestCase):
             req_path.write_text(json.dumps(_SAMPLE_REQUIREMENTS), encoding="utf-8")
             state = _make_state(tmp, _SAMPLE_REQUIREMENTS)
 
-            with patch("agents.code_generator_agent.Ollama") as MockOllama:
+            with patch("agents.code_generator_agent.OllamaLLM") as MockOllama:
                 mock_llm = MagicMock()
                 mock_llm.invoke.return_value = _SAMPLE_CODE
                 MockOllama.return_value = mock_llm
@@ -256,7 +258,7 @@ class TestCodeGeneratorNodeFallback(unittest.TestCase):
         to state['requirements'] and still produce generated_code.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            original_cwd = os.getcwd()
+            original_cwd = str(_PROJECT_ROOT)
             os.chdir(tmp)
             Path("output").mkdir(exist_ok=True)
             Path("logs").mkdir(exist_ok=True)
@@ -264,7 +266,7 @@ class TestCodeGeneratorNodeFallback(unittest.TestCase):
             # Deliberately do NOT create output/requirements.json
             state = _make_state(tmp, requirements=_SAMPLE_REQUIREMENTS)
 
-            with patch("agents.code_generator_agent.Ollama") as MockOllama:
+            with patch("agents.code_generator_agent.OllamaLLM") as MockOllama:
                 mock_llm = MagicMock()
                 mock_llm.invoke.return_value = _SAMPLE_CODE
                 MockOllama.return_value = mock_llm
@@ -281,14 +283,14 @@ class TestCodeGeneratorNodeFallback(unittest.TestCase):
         record an error in state['errors'] and not crash.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            original_cwd = os.getcwd()
+            original_cwd = str(_PROJECT_ROOT)
             os.chdir(tmp)
             Path("output").mkdir(exist_ok=True)
             Path("logs").mkdir(exist_ok=True)
 
             state = _make_state(tmp, requirements=None)
 
-            with patch("agents.code_generator_agent.Ollama"):
+            with patch("agents.code_generator_agent.OllamaLLM"):
                 result = code_generator_node(state)
 
             os.chdir(original_cwd)
@@ -306,7 +308,7 @@ class TestCodeGeneratorNodeFallback(unittest.TestCase):
         fenced_code = f"```python\n{_SAMPLE_CODE}\n```"
 
         with tempfile.TemporaryDirectory() as tmp:
-            original_cwd = os.getcwd()
+            original_cwd = str(_PROJECT_ROOT)
             os.chdir(tmp)
             Path("output").mkdir(exist_ok=True)
             Path("logs").mkdir(exist_ok=True)
@@ -314,7 +316,7 @@ class TestCodeGeneratorNodeFallback(unittest.TestCase):
             req_path.write_text(json.dumps(_SAMPLE_REQUIREMENTS), encoding="utf-8")
             state = _make_state(tmp, _SAMPLE_REQUIREMENTS)
 
-            with patch("agents.code_generator_agent.Ollama") as MockOllama:
+            with patch("agents.code_generator_agent.OllamaLLM") as MockOllama:
                 mock_llm = MagicMock()
                 mock_llm.invoke.return_value = fenced_code
                 MockOllama.return_value = mock_llm
@@ -377,7 +379,10 @@ class TestValidatePythonCodeTool(unittest.TestCase):
         )
         result = validate_python_code(code)
         self.assertTrue(result.is_valid)
-        bare_warnings = [w for w in result.warnings if "bare 'except'" in w]
+        bare_warnings = [
+            w for w in result.warnings
+            if "bare" in w.lower() and "except:" in w.lower()
+        ]
         self.assertTrue(len(bare_warnings) > 0, "bare except should generate a warning")
 
     def test_missing_docstring_generates_warning(self) -> None:
@@ -449,7 +454,7 @@ class TestSecurityValidation(unittest.TestCase):
         not contain any dangerous execution patterns.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            original_cwd = os.getcwd()
+            original_cwd = str(_PROJECT_ROOT)
             os.chdir(tmp)
             Path("output").mkdir(exist_ok=True)
             Path("logs").mkdir(exist_ok=True)
@@ -457,7 +462,7 @@ class TestSecurityValidation(unittest.TestCase):
             req_path.write_text(json.dumps(_SAMPLE_REQUIREMENTS), encoding="utf-8")
             state = _make_state(tmp, _SAMPLE_REQUIREMENTS)
 
-            with patch("agents.code_generator_agent.Ollama") as MockOllama:
+            with patch("agents.code_generator_agent.OllamaLLM") as MockOllama:
                 mock_llm = MagicMock()
                 mock_llm.invoke.return_value = _SAMPLE_CODE
                 MockOllama.return_value = mock_llm
@@ -504,7 +509,7 @@ class TestPropertyBasedConstraints(unittest.TestCase):
     def _generate_with_mock(self, mock_code: str) -> str:
         """Helper: run the agent with a mocked LLM response and return generated_code."""
         with tempfile.TemporaryDirectory() as tmp:
-            original_cwd = os.getcwd()
+            original_cwd = str(_PROJECT_ROOT)
             os.chdir(tmp)
             Path("output").mkdir(exist_ok=True)
             Path("logs").mkdir(exist_ok=True)
@@ -512,7 +517,7 @@ class TestPropertyBasedConstraints(unittest.TestCase):
             req_path.write_text(json.dumps(_SAMPLE_REQUIREMENTS), encoding="utf-8")
             state = _make_state(tmp, _SAMPLE_REQUIREMENTS)
 
-            with patch("agents.code_generator_agent.Ollama") as MockOllama:
+            with patch("agents.code_generator_agent.OllamaLLM") as MockOllama:
                 mock_llm = MagicMock()
                 mock_llm.invoke.return_value = mock_code
                 MockOllama.return_value = mock_llm
@@ -556,13 +561,13 @@ class TestPropertyBasedConstraints(unittest.TestCase):
         regardless of whether the run succeeded or failed.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            original_cwd = os.getcwd()
+            original_cwd = str(_PROJECT_ROOT)
             os.chdir(tmp)
             Path("output").mkdir(exist_ok=True)
             Path("logs").mkdir(exist_ok=True)
             state = _make_state(tmp, requirements=None)  # deliberately broken input
 
-            with patch("agents.code_generator_agent.Ollama"):
+            with patch("agents.code_generator_agent.OllamaLLM"):
                 result = code_generator_node(state)
 
             os.chdir(original_cwd)
@@ -579,13 +584,13 @@ class TestPropertyBasedConstraints(unittest.TestCase):
         after the agent runs, even when the run encounters errors.
         """
         with tempfile.TemporaryDirectory() as tmp:
-            original_cwd = os.getcwd()
+            original_cwd = str(_PROJECT_ROOT)
             os.chdir(tmp)
             Path("output").mkdir(exist_ok=True)
             Path("logs").mkdir(exist_ok=True)
             req_path = Path("output") / "requirements.json"
             req_path.write_text(json.dumps(_SAMPLE_REQUIREMENTS), encoding="utf-8")
-            log_file = Path("logs") / "run_test.json"
+            log_file = Path(tmp) / "logs" / "run_test.json"
             state: SDLCState = SDLCState(
                 user_prompt="test",
                 requirements=_SAMPLE_REQUIREMENTS,
@@ -596,7 +601,7 @@ class TestPropertyBasedConstraints(unittest.TestCase):
                 errors=[],
             )
 
-            with patch("agents.code_generator_agent.Ollama") as MockOllama:
+            with patch("agents.code_generator_agent.OllamaLLM") as MockOllama:
                 mock_llm = MagicMock()
                 mock_llm.invoke.return_value = _SAMPLE_CODE
                 MockOllama.return_value = mock_llm
