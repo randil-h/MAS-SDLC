@@ -11,7 +11,7 @@ Tests validate that the agent:
   7. Code quality: validate_python_code tool accurately detects issues.
   8. Property-based: all functions in any valid output carry return type annotations.
 
-All tests mock the Ollama LLM so they run offline without a running Ollama instance.
+IT22240088
 """
 
 import ast
