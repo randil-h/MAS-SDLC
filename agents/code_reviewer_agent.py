@@ -24,6 +24,7 @@ from langchain_ollama import OllamaLLM as Ollama
 from state import SDLCState
 from tools.analysis_tools import run_static_analysis
 from tools.file_tools import append_log, read_from_file, save_to_file
+from tools.review_tools import parse_review_sections
 
 # ---------------------------------------------------------------------------
 # Constants — overridable via environment variables so that runtime config
@@ -313,6 +314,18 @@ def code_reviewer_node(state: SDLCState) -> SDLCState:
 
         review_report = llm.invoke(prompt)
         tool_calls.append(f"Ollama response received — length={len(review_report)} chars")
+
+        parsed = parse_review_sections(review_report)
+        tool_calls.append(
+            f"parse_review_sections() -> is_complete={parsed.is_complete}, "
+            f"verdict='{parsed.verdict}', "
+            f"missing={parsed.missing_sections}"
+        )
+        if not parsed.is_complete:
+            errors.append(
+                f"[{_AGENT_NAME}] Review report is missing sections: "
+                f"{parsed.missing_sections}"
+            )
 
         # Step 7 — Save report to disk
         save_success = save_to_file(_REVIEW_OUTPUT_PATH, review_report)
