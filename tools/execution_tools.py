@@ -1,10 +1,3 @@
-"""
-Test execution utilities for the MAS SDLC pipeline.
-
-Provides a safe wrapper around pytest that captures all output and never
-propagates exceptions to callers — failures are returned as structured data.
-"""
-
 import subprocess
 import sys
 from pathlib import Path
@@ -12,31 +5,17 @@ from pathlib import Path
 
 def run_pytest(test_file_path: str) -> dict:
     """
-    Execute pytest on a single test file and return structured results.
-
-    The function runs pytest as a subprocess so that even test suites that
-    call sys.exit() or have import errors cannot affect the parent process.
-    stdout and stderr are both captured and merged into the "output" field.
-
-    Parameters
-    ----------
-    test_file_path : str
-        Path to the pytest-compatible Python test file to execute.
-
-    Returns
-    -------
-    dict
-        A dictionary with the following keys:
-
-        - ``passed``  (int): Number of tests that passed.
-        - ``failed``  (int): Number of tests that failed.
-        - ``errors``  (int): Number of tests that errored (collection/fixture errors).
-        - ``output``  (str): Full combined stdout + stderr from the pytest run.
-
-        If pytest cannot be invoked (e.g. not installed, file missing), all
-        counts are 0 and ``output`` contains the error description.
+    Execute pytest and return structured results with parsed test details.
     """
-    result: dict = {"passed": 0, "failed": 0, "errors": 0, "output": ""}
+
+    result = {
+        "passed": 0,
+        "failed": 0,
+        "errors": 0,
+        "output": "",
+        "tests": [],       
+        "failures": []     
+    }
 
     try:
         test_path = Path(test_file_path)
@@ -54,8 +33,23 @@ def run_pytest(test_file_path: str) -> dict:
         combined_output = proc.stdout + proc.stderr
         result["output"] = combined_output
 
-        # Parse the summary line produced by pytest, e.g.:
-        # "3 passed, 1 failed, 2 errors in 0.45s"
+        #  Parse test results (PASSED / FAILED)
+        for line in combined_output.splitlines():
+            if "::" in line and ("PASSED" in line or "FAILED" in line):
+                parts = line.split("::")
+                test_name = parts[-1].split()[0]
+                status = "PASSED" if "PASSED" in line else "FAILED"
+
+                result["tests"].append({
+                    "test": test_name,
+                    "status": status
+                })
+
+            #  Capture failure signals
+            if "AssertionError" in line or "ValueError" in line:
+                result["failures"].append(line.strip())
+
+        #  Parse summary counts
         for line in combined_output.splitlines():
             line_lower = line.lower()
             if " passed" in line_lower or " failed" in line_lower or " error" in line_lower:
@@ -71,31 +65,19 @@ def run_pytest(test_file_path: str) -> dict:
 
     except subprocess.TimeoutExpired:
         result["output"] = "[execution_tools] pytest timed out after 120 seconds."
+
     except FileNotFoundError:
         result["output"] = (
-            "[execution_tools] pytest is not installed or not accessible on PATH. "
-            "Install it with: pip install pytest"
+            "[execution_tools] pytest is not installed. Run: pip install pytest"
         )
+
     except Exception as exc:
-        result["output"] = f"[execution_tools] Unexpected error running pytest: {exc}"
+        result["output"] = f"[execution_tools] Unexpected error: {exc}"
 
     return result
 
 
 def _extract_count(text: str) -> int:
-    """
-    Extract the leading integer from a pytest summary fragment such as '3 passed'.
-
-    Parameters
-    ----------
-    text : str
-        A whitespace-stripped summary fragment.
-
-    Returns
-    -------
-    int
-        The extracted count, or 0 if no integer prefix is found.
-    """
     try:
         return int(text.split()[0])
     except (ValueError, IndexError):
