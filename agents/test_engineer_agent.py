@@ -6,10 +6,11 @@ Input    : state["generated_code"], state["requirements"]
 Output   : pytest suite + structured execution results
 """
 
+import ast
 import json
 import os
+import re
 import sys
-import ast
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,7 +47,11 @@ RULES:
     2. Edge cases from requirements
     3. At least 2 negative tests
 - Every test must include a docstring
-- Use pytest only (no external libraries)
+- Use pytest only (no external libraries).
+- ALWAYS add `import pytest` at the top when you use @pytest.fixture, pytest.raises,
+  pytest.mark, or any other pytest API.
+- If you use `time.sleep` or datetime helpers, include the matching imports (`import time`, etc.).
+- If you reference `hashlib`, `datetime`, etc., add matching imports (`import hashlib`, etc.).
 - Name tests like:
     test_<behavior>_<condition>
 """
@@ -55,6 +60,46 @@ RULES:
 # -------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------
+
+def ensure_test_helper_imports(code: str) -> str:
+    """
+    Models often omit imports; inserting them avoids NameError during collection.
+
+    Imports are inserted **after** `from generated_code import ...` when present so that
+    ``import pytest`` survives after `from generated_code import *` (star-import could
+    otherwise shadow pytest if it were placed above).
+    """
+    needs_pytest = bool(re.search(r"@pytest\b|\bpytest\.(raises|mark|fixture|parametrize)\b", code))
+    needs_time = "time.sleep" in code
+    needs_hashlib = bool(re.search(r"\bhashlib\.", code))
+
+    def _has_import(pat: str) -> bool:
+        return bool(re.search(pat, code, flags=re.MULTILINE))
+
+    to_add: list[str] = []
+    if needs_pytest and not _has_import(r"(?m)^(?:import\s+pytest\b|from\s+pytest\b)"):
+        to_add.append("import pytest")
+    if needs_time and not _has_import(r"(?m)^(?:import\s+time\b|from\s+time\b)"):
+        to_add.append("import time")
+    if needs_hashlib and not _has_import(r"(?m)^(?:import\s+hashlib\b|from\s+hashlib\b)"):
+        to_add.append("import hashlib")
+
+    if not to_add:
+        return code
+
+    lines = code.replace("\r\n", "\n").split("\n")
+    anchor = -1
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*from\s+generated_code\s+import\s+", line):
+            anchor = i
+
+    if anchor >= 0:
+        merged = [*lines[: anchor + 1], *to_add, *lines[anchor + 1 :]]
+        out = "\n".join(merged)
+        return out + "\n" if code.endswith("\n") else out
+
+    return "\n".join(to_add) + "\n" + code
+
 
 def build_prompt(code: str, requirements: dict) -> str:
     requirements_json = json.dumps(requirements, indent=2)
@@ -163,6 +208,8 @@ def test_engineer_node(state: SDLCState) -> SDLCState:
                 "import sys\nsys.path.append('output')\nfrom generated_code import *"
             )
 
+        generated_tests = ensure_test_helper_imports(generated_tests)
+
         if not is_valid_python(generated_tests):
             raise Exception("Generated test code is not valid Python")
 
@@ -201,6 +248,15 @@ def test_engineer_node(state: SDLCState) -> SDLCState:
             "test_quality_issues": []
         }
 
+        rc = raw_results.get("exit_code")
+
+        if raw_results["errors"] > 0 or (
+            isinstance(rc, int) and rc not in (0, 5) and raw_results["passed"] == 0
+        ):
+            analysis["root_causes"].append(
+                "pytest aborted during collection/setup or crashed — inspect raw_output"
+            )
+
         if raw_results["failed"] > 0:
             analysis["root_causes"].append("Core functionality not aligned with requirements")
 
@@ -210,6 +266,12 @@ def test_engineer_node(state: SDLCState) -> SDLCState:
         if "ValueError" in raw_results["output"]:
             analysis["root_causes"].append("Exception handling mismatch")
 
+        failed_summary = raw_results["failed"] > 0 or raw_results["errors"] > 0
+        if isinstance(rc, int) and rc != 0:
+            failed_summary = True
+
+        summary_status = "FAILED" if failed_summary else "PASSED"
+
         # Final structured result
         test_results = {
             "summary": {
@@ -217,7 +279,8 @@ def test_engineer_node(state: SDLCState) -> SDLCState:
                 "passed": raw_results["passed"],
                 "failed": raw_results["failed"],
                 "errors": raw_results["errors"],
-                "status": "FAILED" if raw_results["failed"] > 0 else "PASSED"
+                "exit_code": rc,
+                "status": summary_status,
             },
             "coverage": coverage,
             "failures": structured_failures,

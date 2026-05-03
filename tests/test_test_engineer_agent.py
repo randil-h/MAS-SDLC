@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from agents.test_engineer_agent import test_engineer_node
+from agents.test_engineer_agent import ensure_test_helper_imports, test_engineer_node as run_test_engineer
 from state import SDLCState
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -60,10 +60,12 @@ class TestTestEngineerNode(unittest.TestCase):
                     mock_pytest.return_value = {
                         "passed": 1,
                         "failed": 0,
-                        "errors": 0
+                        "errors": 0,
+                        "output": "",
+                        "exit_code": 0,
                     }
 
-                    result = test_engineer_node(state)
+                    result = run_test_engineer(state)
 
         finally:
             os.chdir(original_cwd)
@@ -103,9 +105,10 @@ class TestTestEngineerNode(unittest.TestCase):
 
         test_results = result["test_results"]
 
-        self.assertIn("passed", test_results)
-        self.assertIn("failed", test_results)
-        self.assertIn("errors", test_results)
+        self.assertIn("summary", test_results)
+        self.assertIn("passed", test_results["summary"])
+        self.assertIn("failed", test_results["summary"])
+        self.assertIn("errors", test_results["summary"])
 
     # -------------------------------------------------------
 
@@ -128,9 +131,15 @@ class TestTestEngineerNode(unittest.TestCase):
                 MockOllama.return_value = mock_llm
 
                 with patch("agents.test_engineer_agent.run_pytest") as mock_pytest:
-                    mock_pytest.return_value = {"passed": 1, "failed": 0, "errors": 0}
+                    mock_pytest.return_value = {
+                        "passed": 1,
+                        "failed": 0,
+                        "errors": 0,
+                        "output": "",
+                        "exit_code": 0,
+                    }
 
-                    test_engineer_node(state)
+                    run_test_engineer(state)
 
             os.chdir(original_cwd)
 
@@ -138,6 +147,19 @@ class TestTestEngineerNode(unittest.TestCase):
             self.assertNotIn("```", code)
 
     # -------------------------------------------------------
+
+    def test_ensure_helper_imports_placed_after_generated_code_import(self):
+        """pytest must be imported after `from generated_code import *` (star-import safe)."""
+        raw = """import sys
+sys.path.append('output')
+from generated_code import *
+
+@pytest.fixture
+def _x():
+    pass
+"""
+        out = ensure_test_helper_imports(raw)
+        self.assertRegex(out, r"from generated_code import \*\nimport pytest\n")
 
     def test_handles_invalid_python_from_llm(self):
         """Invalid Python from LLM should be caught and logged as error."""
@@ -157,7 +179,7 @@ class TestTestEngineerNode(unittest.TestCase):
                 mock_llm.invoke.return_value = bad_code
                 MockOllama.return_value = mock_llm
 
-                result = test_engineer_node(state)
+                result = run_test_engineer(state)
 
             os.chdir(original_cwd)
 
