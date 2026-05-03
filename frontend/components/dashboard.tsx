@@ -1,6 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { createRun, getRun, RunDetails, PipelineStep } from "@/lib/api";
 
 type ActiveTab = "requirements" | "code" | "tests" | "review";
@@ -101,6 +103,8 @@ export function Dashboard() {
   const [runId, setRunId]               = useState<string | null>(null);
   const [run, setRun]                   = useState<RunDetails | null>(null);
   const [tab, setTab]                   = useState<ActiveTab>("requirements");
+  const [reviewViewMode, setReviewViewMode] = useState<"text" | "code">("text");
+  const [copied, setCopied]             = useState(false);
   const [submitError, setSubmitError]   = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -108,6 +112,13 @@ export function Dashboard() {
     selectedModel === "__custom__" ? customModel.trim() : selectedModel;
 
   const selectedOption = MODEL_OPTIONS.find((m) => m.value === selectedModel);
+
+  const copyReviewMarkdown = async () => {
+    const content = run?.result?.review_report ?? "";
+    await navigator.clipboard.writeText(content);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   /* polling — exponential back-off, stops after 5 consecutive hard errors */
   useEffect(() => {
@@ -388,8 +399,105 @@ export function Dashboard() {
             ))}
           </div>
 
+          {/* Review tab controls */}
+          {tab === "review" && run?.result && (
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-0.5 p-0.5 bg-stone-100 rounded-lg">
+                <button
+                  onClick={() => setReviewViewMode("text")}
+                  title="Preview"
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                    reviewViewMode === "text"
+                      ? "bg-white shadow-sm text-stone-900"
+                      : "text-stone-400 hover:text-stone-600"
+                  }`}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                  Preview
+                </button>
+                <button
+                  onClick={() => setReviewViewMode("code")}
+                  title="Raw markdown"
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                    reviewViewMode === "code"
+                      ? "bg-white shadow-sm text-stone-900"
+                      : "text-stone-400 hover:text-stone-600"
+                  }`}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="16 18 22 12 16 6" />
+                    <polyline points="8 6 2 12 8 18" />
+                  </svg>
+                  Raw
+                </button>
+              </div>
+              {run.result.review_report && (
+                <button
+                  onClick={copyReviewMarkdown}
+                  title="Copy markdown"
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium text-stone-500 hover:text-stone-900 hover:bg-stone-100 transition-all"
+                >
+                  {copied ? (
+                    <>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                      </svg>
+                      Copy
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+          )}
+
           {!run?.result ? (
             <p className="text-stone-400 text-sm py-4">Outputs appear here once the pipeline completes.</p>
+          ) : tab === "review" && reviewViewMode === "text" ? (
+            <div className="bg-stone-50 border border-stone-100 rounded-lg p-5 max-h-[500px] overflow-auto">
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  h1: ({...props}) => <h1 className="text-2xl font-bold border-b border-stone-200 pb-2 mb-4 mt-2 text-stone-900" {...props} />,
+                  h2: ({...props}) => <h2 className="text-xl font-semibold border-b border-stone-200 pb-1.5 mb-3 mt-5 text-stone-900" {...props} />,
+                  h3: ({...props}) => <h3 className="text-base font-semibold mb-2 mt-4 text-stone-900" {...props} />,
+                  h4: ({...props}) => <h4 className="text-sm font-semibold mb-1.5 mt-3 text-stone-800" {...props} />,
+                  p: ({...props}) => <p className="mb-3 text-[13px] text-stone-700 leading-relaxed" {...props} />,
+                  ul: ({...props}) => <ul className="list-disc pl-5 mb-3 space-y-0.5 text-[13px] text-stone-700" {...props} />,
+                  ol: ({...props}) => <ol className="list-decimal pl-5 mb-3 space-y-0.5 text-[13px] text-stone-700" {...props} />,
+                  li: ({...props}) => <li className="leading-relaxed" {...props} />,
+                  blockquote: ({...props}) => <blockquote className="border-l-4 border-stone-300 pl-4 py-0.5 italic text-stone-500 my-3" {...props} />,
+                  pre: ({...props}) => <pre className="bg-white border border-stone-200 rounded-md p-3.5 overflow-auto text-[12px] leading-6 font-mono mb-3" {...props} />,
+                  code: (props) => {
+                    const { className, children } = props;
+                    const isBlock = /language-/.test(className ?? "");
+                    return isBlock
+                      ? <code className={`font-mono text-[12px] text-stone-700 ${className ?? ""}`}>{children}</code>
+                      : <code className="bg-stone-100 text-stone-800 px-1 py-0.5 rounded text-[12px] font-mono">{children}</code>;
+                  },
+                  a: ({...props}) => <a className="text-blue-600 hover:underline" {...props} />,
+                  hr: () => <hr className="border-stone-200 my-4" />,
+                  strong: ({...props}) => <strong className="font-semibold text-stone-900" {...props} />,
+                  table: ({...props}) => <div className="overflow-auto mb-3"><table className="min-w-full border-collapse border border-stone-200 text-[13px]" {...props} /></div>,
+                  thead: ({...props}) => <thead className="bg-stone-100" {...props} />,
+                  th: ({...props}) => <th className="border border-stone-200 px-3 py-1.5 text-left font-semibold text-stone-700 text-[12px]" {...props} />,
+                  td: ({...props}) => <td className="border border-stone-200 px-3 py-1.5 text-stone-700" {...props} />,
+                  tr: ({...props}) => <tr className="even:bg-stone-50" {...props} />,
+                }}
+              >
+                {run.result.review_report ?? "No report generated."}
+              </ReactMarkdown>
+            </div>
           ) : (
             <pre className="bg-stone-50 border border-stone-100 rounded-lg p-5 max-h-[500px] overflow-auto text-[12.5px] leading-7 text-stone-700 font-mono whitespace-pre-wrap break-words">
               {tab === "requirements" && prettyJson(run.result.requirements)}
