@@ -178,6 +178,18 @@ def _mutate_run(run_id: str, updates: dict[str, Any]) -> None:
         _persist_run(run_id, run)
 
 
+def _result_payload_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Snapshot artefacts produced so far (used after each step and on failure)."""
+    return {
+        "requirements": state.get("requirements"),
+        "generated_code": state.get("generated_code"),
+        "test_results": state.get("test_results"),
+        "review_report": state.get("review_report"),
+        "errors": list(state.get("errors") or []),
+        "log_path": state.get("log_path"),
+    }
+
+
 def _new_run_state(payload: RunCreateRequest) -> dict[str, Any]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = f"logs/run_{timestamp}_{uuid.uuid4().hex[:8]}.json"
@@ -347,6 +359,7 @@ def _pipeline_worker(run_id: str) -> None:
                 current_run["steps"][idx]["completed_at"]   = _utc_now_iso()
                 current_run["progress_percent"]             = int(((idx + 1) / total_steps) * 100)
                 current_run["errors"]                       = list(state.get("errors") or [])
+                current_run["result"]                       = _result_payload_from_state(state)
                 _persist_run(run_id, current_run)
 
         with _runs_lock:
@@ -355,14 +368,7 @@ def _pipeline_worker(run_id: str) -> None:
             current_run["current_step_key"]     = None
             current_run["current_step_label"]   = None
             current_run["completed_at"]         = _utc_now_iso()
-            current_run["result"] = {
-                "requirements":  state.get("requirements"),
-                "generated_code": state.get("generated_code"),
-                "test_results":  state.get("test_results"),
-                "review_report": state.get("review_report"),
-                "errors":        state.get("errors") or [],
-                "log_path":      state.get("log_path"),
-            }
+            current_run["result"]               = _result_payload_from_state(state)
             _persist_run(run_id, current_run)
 
     except Exception as exc:
@@ -373,6 +379,7 @@ def _pipeline_worker(run_id: str) -> None:
             current_run["errors"]       = list(current_run.get("errors") or []) + [
                 f"Unhandled pipeline error: {exc}"
             ]
+            current_run["result"]       = _result_payload_from_state(state)
             if current_run["current_step_key"]:
                 for step in current_run["steps"]:
                     if step["key"] == current_run["current_step_key"] and step["status"] == "running":

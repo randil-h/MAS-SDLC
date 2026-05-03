@@ -67,6 +67,20 @@ function prettyJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
+function mergedRunErrors(errors: string[] | undefined, resultErrors: string[] | undefined): string[] {
+  const out: string[] = [];
+  for (const e of errors ?? []) {
+    if (!out.includes(e)) out.push(e);
+  }
+  for (const e of resultErrors ?? []) {
+    if (!out.includes(e)) out.push(e);
+  }
+  return out;
+}
+
+const TAB_EMPTY =
+  "This step did not complete or produced no output. Other tabs may still show results from earlier agents.";
+
 /* ── Small reusable pieces ───────────────────────────────────────────────── */
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
@@ -173,6 +187,11 @@ export function Dashboard() {
   const isActive = isSubmitting || run?.status === "queued" || run?.status === "running";
 
   const progressPct = run?.progress_percent ?? 0;
+
+  const errorMessages = useMemo(
+    () => mergedRunErrors(run?.errors, run?.result?.errors),
+    [run?.errors, run?.result?.errors],
+  );
 
   const onSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -495,25 +514,35 @@ export function Dashboard() {
                   tr: ({...props}) => <tr className="even:bg-stone-50" {...props} />,
                 }}
               >
-                {run.result.review_report ?? "No report generated."}
+                {run.result.review_report?.trim()
+                  ? run.result.review_report
+                  : TAB_EMPTY}
               </ReactMarkdown>
             </div>
           ) : (
             <pre className="bg-stone-50 border border-stone-100 rounded-lg p-5 max-h-[500px] overflow-auto text-[12.5px] leading-7 text-stone-700 font-mono whitespace-pre-wrap break-words">
-              {tab === "requirements" && prettyJson(run.result.requirements)}
-              {tab === "code"         && (run.result.generated_code      ?? "No code generated.")}
-              {tab === "tests"        && prettyJson(run.result.test_results)}
-              {tab === "review"       && (run.result.review_report        ?? "No report generated.")}
+              {tab === "requirements" &&
+                (run.result.requirements != null ? prettyJson(run.result.requirements) : TAB_EMPTY)}
+              {tab === "code" &&
+                (run.result.generated_code?.trim()
+                  ? run.result.generated_code
+                  : TAB_EMPTY)}
+              {tab === "tests" &&
+                (run.result.test_results != null ? prettyJson(run.result.test_results) : TAB_EMPTY)}
+              {tab === "review" &&
+                (run.result.review_report?.trim()
+                  ? run.result.review_report
+                  : TAB_EMPTY)}
             </pre>
           )}
 
-          {(run?.errors?.length ?? 0) > 0 && (
+          {errorMessages.length > 0 && (
             <div className="mt-5 border border-red-200 rounded-lg p-5">
               <p className="text-[10px] font-bold tracking-[0.16em] uppercase text-red-500 mb-3">
                 Errors & Warnings
               </p>
               <ul className="list-disc pl-4 space-y-1.5">
-                {run!.errors.map((msg, i) => (
+                {errorMessages.map((msg, i) => (
                   <li key={i} className="text-red-700 text-sm">{msg}</li>
                 ))}
               </ul>
